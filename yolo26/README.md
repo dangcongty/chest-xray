@@ -121,7 +121,7 @@ python predict.py --weights runs/train/exp/weights/best.pt --source path/to/imag
 
 ## Điều gì đã được lược bỏ?
 
-Bản compact chủ động không chứa segmentation, semantic segmentation, depth, classification, pose, OBB, tracking, exporter, HUB/cloud, tuning, callbacks, plotting phức tạp, DDP và multi-scale training. Mosaic ở đây là bản 4 ô cố định, không phải toàn bộ chuỗi augmentation của Ultralytics. Vì vậy:
+Bản compact chủ động không chứa semantic segmentation, depth, classification, pose, OBB, tracking, exporter, HUB/cloud, tuning, callbacks, plotting phức tạp và multi-scale training. Trainer hiện hỗ trợ DDP nhiều GPU. Mosaic ở đây là bản 4 ô cố định, không phải toàn bộ chuỗi augmentation của Ultralytics. Vì vậy:
 
 - kiến trúc detection, raw output và loss được giữ tương thích;
 - official detection weights chuyển được;
@@ -139,4 +139,3 @@ python -m unittest discover -s tests -v
 Code được viết lại từ Ultralytics repository tại commit `6900c83b16eebee55c7b9de23b9ef447e6ff11e7` (2026-09-17), tập trung duy nhất vào detect. Kiến trúc tham chiếu `ultralytics/cfg/models/26/yolo26.yaml`; head ở `ultralytics/nn/modules/head.py`; loss/assigner ở `ultralytics/utils/loss.py` và `ultralytics/utils/tal.py`.
 
 Dự án phái sinh được phát hành theo **GNU Affero General Public License v3.0 only (AGPL-3.0-only)**. Xem `LICENSE` và `NOTICE.md`.
-

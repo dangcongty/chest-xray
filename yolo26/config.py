@@ -56,9 +56,16 @@ class TrainConfig:
     max_det: int = 300
 
     # Model/data route. ``image`` keeps the original YOLO26 backbone.
-    # ``mask_guider`` enables the parallel mask backbone and P3/P4/P5 fusion.
+    # ``mask_guider`` uses external masks. ``coarse_guider`` learns coarse
+    # class-aware regions from large boxes and uses them to guide small boxes.
     model_route: str = "mask_guider"
     mask_channels: int = 4
+    guide_loss_weight: float = 0.5
+    guide_iobb: float = 0.8
+    guide_min_area_ratio: float = 4.0
+    guide_min_area: float = 0.10
+    guide_min_width: float = 0.35
+    guide_min_height: float = 0.50
     # Label route. False keeps standard YOLO rows: class x y w h.
     # True enables multi-class rows: class1 class2 ... x y w h.
     use_multiclass: bool = False
@@ -70,12 +77,20 @@ class TrainConfig:
             raise ValueError("image_size must be divisible by 32")
         if self.epochs < 1 or self.batch_size < 1:
             raise ValueError("epochs and batch_size must be positive")
-        if self.model_route not in {"image", "mask_guider"}:
-            raise ValueError("model_route must be 'image' or 'mask_guider'")
+        if self.model_route not in {"image", "mask_guider", "coarse_guider"}:
+            raise ValueError("model_route must be 'image', 'mask_guider' or 'coarse_guider'")
         if self.mask_channels < 1:
             raise ValueError("mask_channels must be positive")
         if not isinstance(self.use_multiclass, bool):
             raise ValueError("use_multiclass must be a bool")
+        if self.model_route == "coarse_guider" and self.use_multiclass:
+            raise ValueError("coarse_guider currently requires standard single-class YOLO labels")
+        if self.guide_loss_weight < 0:
+            raise ValueError("guide_loss_weight must be non-negative")
+        if not 0 <= self.guide_iobb <= 1:
+            raise ValueError("guide_iobb must be in [0, 1]")
+        if self.guide_min_area_ratio <= 1:
+            raise ValueError("guide_min_area_ratio must be > 1")
         if isinstance(self.device, list):
             if not self.device:
                 raise ValueError("device list cannot be empty")

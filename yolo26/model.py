@@ -523,12 +523,72 @@ class YOLO26withMaskGuider(YOLO26):
         return result
 
 
+class YOLO26withCoarseGuider(YOLO26):
+    """YOLO26 with internally predicted class-aware coarse region guidance.
+
+    Large boxes supervise ``guide_heads`` at P3/P4/P5. Their probabilities are
+    reduced across classes and applied as residual spatial attention, so the
+    detector never requires ground-truth guidance during inference.
+    """
+
+    def __init__(self, nc=80, size="n"):
+        super().__init__(nc=nc, size=size)
+        self.model_route = "coarse_guider"
+        p3_channels = self.model[4].cv2.conv.out_channels
+        p4_channels = self.model[6].cv2.conv.out_channels
+        p5_channels = self.model[8].cv2.conv.out_channels
+        self.guide_heads = nn.ModuleList(nn.Conv2d(c, nc, 1) for c in (p3_channels, p4_channels, p5_channels))
+        for head in self.guide_heads:
+            nn.init.constant_(head.bias, -4.0)
+
+    @staticmethod
+    def _guide(feature: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        attention = logits.sigmoid().amax(dim=1, keepdim=True)
+        return feature * (1.0 + attention)
+
+    def forward(self, image: torch.Tensor):
+        x = self.model[0](image)
+        x = self.model[1](x)
+        x = self.model[2](x)
+        x = self.model[3](x)
+        p3_raw = self.model[4](x)
+        guide_p3 = self.guide_heads[0](p3_raw)
+        p3_backbone = self._guide(p3_raw, guide_p3)
+        x = self.model[5](p3_backbone)
+        p4_raw = self.model[6](x)
+        guide_p4 = self.guide_heads[1](p4_raw)
+        p4_backbone = self._guide(p4_raw, guide_p4)
+        x = self.model[7](p4_backbone)
+        p5_raw = self.model[8](x)
+        guide_p5 = self.guide_heads[2](p5_raw)
+        x = self._guide(p5_raw, guide_p5)
+        x = self.model[9](x)
+        p5_backbone = self.model[10](x)
+
+        x = self.model[11](p5_backbone)
+        x = self.model[12]([x, p4_backbone])
+        p4_fpn = self.model[13](x)
+        x = self.model[14](p4_fpn)
+        x = self.model[15]([x, p3_backbone])
+        p3 = self.model[16](x)
+        x = self.model[17](p3)
+        x = self.model[18]([x, p4_fpn])
+        p4 = self.model[19](x)
+        x = self.model[20](p4)
+        x = self.model[21]([x, p5_backbone])
+        p5 = self.model[22](x)
+        output = self.model[23]([p3, p4, p5])
+        output["guide_logits"] = (guide_p3, guide_p4, guide_p5)
+        return output
+
+
 def build_model(
     size="n", nc=80, weights: str | None = None, model_route="image", mask_channels=1
 ) -> YOLO26:
     routes = {
         "image": YOLO26,
         "mask_guider": YOLO26withMaskGuider,
+        "coarse_guider": YOLO26withCoarseGuider,
     }
     if model_route not in routes:
         raise ValueError(f"unknown model route {model_route!r}; choose from {tuple(routes)}")

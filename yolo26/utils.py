@@ -62,7 +62,7 @@ def cleanup_distributed():
 
 
 def move_batch(batch, device):
-    for key in ("img", "mask", "cls", "bboxes", "batch_idx"):
+    for key in ("img", "mask", "guide_mask", "cls", "bboxes", "batch_idx"):
         if key not in batch:
             continue
         batch[key] = batch[key].to(device, non_blocking=True)

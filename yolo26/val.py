@@ -30,20 +30,23 @@ def evaluate(
 ):
     model.eval()
     metrics = DetectionMetrics(model.nc, names)
-    loss_sum = torch.zeros(3, device=device)
+    loss_sum = None
     seen = 0
     for batch in tqdm(loader, desc="val", leave=False):
         batch = move_batch(batch, device)
         raw = forward_batch(model, batch)
         if criterion is not None:
             loss_vec, _ = criterion(raw, batch)
+            if loss_sum is None:
+                loss_sum = torch.zeros_like(loss_vec)
             loss_sum += loss_vec
         predictions = model.head.postprocess(raw, conf, iou, max_det, end2end, multi_label=use_multiclass)
         metrics.update(predictions, batch, image_size)
         seen += batch["img"].shape[0]
     result = metrics.compute()
     if criterion is not None:
-        result["val_box_loss"], result["val_cls_loss"], result["val_l1_loss"] = (loss_sum / max(seen, 1)).tolist()
+        values = (loss_sum / max(seen, 1)).tolist()
+        result.update(dict(zip(("val_box_loss", "val_cls_loss", "val_l1_loss", "val_guide_loss"), values)))
     return result
 
 
@@ -77,6 +80,7 @@ def main():
         if isinstance(ckpt, dict) else False
     )
     use_multiclass = checkpoint_multiclass if args.use_multiclass is None else args.use_multiclass
+    train_args = ckpt.get("train_args", {}) if isinstance(ckpt, dict) else {}
     model = build_model(size=size, nc=data["nc"], model_route=model_route, mask_channels=mask_channels).to(device)
     model.load_compact(args.weights, strict=False)
     loader = create_dataloader(
@@ -84,6 +88,12 @@ def main():
         mask_source=data.get("val_masks") if model_route == "mask_guider" else None,
         mask_channels=mask_channels,
         use_multiclass=use_multiclass,
+        use_coarse_guider=model_route == "coarse_guider",
+        guide_iobb=float(train_args.get("guide_iobb", 0.8)),
+        guide_min_area_ratio=float(train_args.get("guide_min_area_ratio", 4.0)),
+        guide_min_area=float(train_args.get("guide_min_area", 0.10)),
+        guide_min_width=float(train_args.get("guide_min_width", 0.35)),
+        guide_min_height=float(train_args.get("guide_min_height", 0.50)),
     )
     result = evaluate(
         model, loader, device, data["names"], args.imgsz, args.conf, args.iou, args.max_det, args.end2end,

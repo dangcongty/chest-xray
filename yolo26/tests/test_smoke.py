@@ -11,7 +11,7 @@ import torch
 from dataloader import YOLODataset, read_label
 from losses import YOLO26Loss
 from metrics import DetectionMetrics
-from model import YOLO26
+from model import YOLO26, build_model
 
 
 class SmokeTests(unittest.TestCase):
@@ -53,6 +53,39 @@ class SmokeTests(unittest.TestCase):
             sample = dataset[0]
             self.assertEqual(tuple(sample["img"].shape), (3, 64, 64))
             self.assertEqual(tuple(sample["bboxes"].shape), (1, 4))
+
+    def test_coarse_guider_dataset_and_backward(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "images/train").mkdir(parents=True)
+            (root / "labels/train").mkdir(parents=True)
+            cv2.imwrite(str(root / "images/train/a.jpg"), np.full((64, 64, 3), 127, np.uint8))
+            (root / "labels/train/a.txt").write_text(
+                "0 0.5 0.5 0.8 0.8\n0 0.5 0.5 0.1 0.1\n", encoding="utf-8"
+            )
+            dataset = YOLODataset(
+                str(root / "images/train"), nc=1, image_size=64, use_coarse_guider=True,
+                guide_min_width=0.5, guide_min_height=0.5,
+            )
+            sample = dataset[0]
+            self.assertEqual(tuple(sample["bboxes"].shape), (1, 4))
+            self.assertEqual(tuple(sample["guide_mask"].shape), (1, 64, 64))
+            self.assertGreater(sample["guide_mask"].sum().item(), 0)
+
+            model = build_model(size="n", nc=1, model_route="coarse_guider").train()
+            batch = {
+                "batch_idx": torch.tensor([0]),
+                "cls": sample["cls"],
+                "bboxes": sample["bboxes"],
+                "guide_mask": sample["guide_mask"].unsqueeze(0),
+            }
+            predictions = model(sample["img"].unsqueeze(0))
+            loss, items = YOLO26Loss(model, epochs=10)(predictions, batch)
+            self.assertEqual(loss.numel(), 4)
+            self.assertIn("guide", items)
+            self.assertTrue(torch.isfinite(loss).all())
+            loss.sum().backward()
+            self.assertIsNotNone(model.guide_heads[0].weight.grad)
 
     def test_label_routes_are_separate(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -114,6 +114,12 @@ def _train(cfg: TrainConfig):
         rank=rank,
         world_size=world_size,
         use_multiclass=cfg.use_multiclass,
+        use_coarse_guider=cfg.model_route == "coarse_guider",
+        guide_iobb=cfg.guide_iobb,
+        guide_min_area_ratio=cfg.guide_min_area_ratio,
+        guide_min_area=cfg.guide_min_area,
+        guide_min_width=cfg.guide_min_width,
+        guide_min_height=cfg.guide_min_height,
     )
     val_loader = None
     if is_main:
@@ -122,11 +128,19 @@ def _train(cfg: TrainConfig):
             mask_source=data.get("val_masks") if cfg.model_route == "mask_guider" else None,
             mask_channels=cfg.mask_channels,
             use_multiclass=cfg.use_multiclass,
+            use_coarse_guider=cfg.model_route == "coarse_guider",
+            guide_iobb=cfg.guide_iobb,
+            guide_min_area_ratio=cfg.guide_min_area_ratio,
+            guide_min_area=cfg.guide_min_area,
+            guide_min_width=cfg.guide_min_width,
+            guide_min_height=cfg.guide_min_height,
         )
     if cfg.use_multiclass:
-        criterion = YOLO26Loss(model_core, cfg.epochs, cfg.box, cfg.cls, cfg.l1, use_multiclass=True)
+        criterion = YOLO26Loss(model_core, cfg.epochs, cfg.box, cfg.cls, cfg.l1, use_multiclass=True,
+                               guide_loss_weight=cfg.guide_loss_weight)
     else:
-        criterion = YOLO26Loss(model_core, cfg.epochs, cfg.box, cfg.cls, cfg.l1, use_multiclass=False)
+        criterion = YOLO26Loss(model_core, cfg.epochs, cfg.box, cfg.cls, cfg.l1, use_multiclass=False,
+                               guide_loss_weight=cfg.guide_loss_weight)
     amp_enabled = cfg.amp and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     if is_main:
@@ -172,6 +186,7 @@ def _train(cfg: TrainConfig):
                     loss=f"{loss_meter.avg:.4f}",
                     lr=f"{optimizer.param_groups[0]['lr']:.2e}",
                     o2m=f"{items['o2m_weight']:.2f}",
+                    guide=f"{items['guide']:.3f}" if "guide" in items else "-",
                 )
 
         totals = torch.tensor([loss_meter.total, loss_meter.count], device=device, dtype=torch.float64)
@@ -311,20 +326,23 @@ if __name__ == "__main__":
     # One GPU: device="0" or device=0
     # Multiple GPUs: device=[0, 1] (DDP processes are launched automatically)
     train(
-        data="/mnt/workspace/ty/xray/datasets/yolo_stable_split/data.yaml",
+        data="/mnt/workspace/ty/xray/datasets/yolo/data.yaml",
         size="m",
         weights="yolo26m.pt",
-        model_route="mask_guider",  # image | mask_guider
+        model_route="coarse_guider",  # image | mask_guider | coarse_guider
         mask_channels=4,
+        guide_loss_weight=0.5,
+        guide_iobb=0.8,
+        guide_min_area_ratio=4.0,
         use_multiclass=False,
         epochs=500,
         image_size=640,
         batch_size=16,
         workers=8,
-        device=[0, 1],
+        device=0,
         optimizer="AdamW",
         lr=1e-3,
-        name="stable-data-compact-attempt-1",
+        name="coarse-guider-yolo-attempt-1",
         seed=1234,
         hflip=0.5,
         hsv_h=0.0,

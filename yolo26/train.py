@@ -91,17 +91,31 @@ def train(cfg: TrainConfig):
         mask_source=data.get("train_masks") if cfg.model_route == "mask_guider" else None,
         mask_channels=cfg.mask_channels,
         use_multiclass=cfg.use_multiclass,
+        use_coarse_guider=cfg.model_route == "coarse_guider",
+        guide_iobb=cfg.guide_iobb,
+        guide_min_area_ratio=cfg.guide_min_area_ratio,
+        guide_min_area=cfg.guide_min_area,
+        guide_min_width=cfg.guide_min_width,
+        guide_min_height=cfg.guide_min_height,
     )
     val_loader = create_dataloader(
         data["val"], data["nc"], cfg.image_size, cfg.batch_size, cfg.workers,
         mask_source=data.get("val_masks") if cfg.model_route == "mask_guider" else None,
         mask_channels=cfg.mask_channels,
         use_multiclass=cfg.use_multiclass,
+        use_coarse_guider=cfg.model_route == "coarse_guider",
+        guide_iobb=cfg.guide_iobb,
+        guide_min_area_ratio=cfg.guide_min_area_ratio,
+        guide_min_area=cfg.guide_min_area,
+        guide_min_width=cfg.guide_min_width,
+        guide_min_height=cfg.guide_min_height,
     )
     if cfg.use_multiclass:
-        criterion = YOLO26Loss(model, cfg.epochs, cfg.box, cfg.cls, cfg.l1, use_multiclass=True)
+        criterion = YOLO26Loss(model, cfg.epochs, cfg.box, cfg.cls, cfg.l1, use_multiclass=True,
+                               guide_loss_weight=cfg.guide_loss_weight)
     else:
-        criterion = YOLO26Loss(model, cfg.epochs, cfg.box, cfg.cls, cfg.l1, use_multiclass=False)
+        criterion = YOLO26Loss(model, cfg.epochs, cfg.box, cfg.cls, cfg.l1, use_multiclass=False,
+                               guide_loss_weight=cfg.guide_loss_weight)
     amp_enabled = cfg.amp and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     print(

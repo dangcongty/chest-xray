@@ -162,6 +162,57 @@ def xyxy_to_xywhn(boxes: np.ndarray, width: int, height: int) -> np.ndarray:
     return out
 
 
+def split_coarse_guide_boxes(
+    classes: np.ndarray,
+    boxes: np.ndarray,
+    image_size: int,
+    iobb_threshold: float = 0.8,
+    min_area_ratio: float = 4.0,
+    min_area: float = 0.10,
+    min_width: float = 0.35,
+    min_height: float = 0.50,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Move large boxes containing a smaller same-class box to guide targets."""
+    if not len(boxes):
+        return classes, boxes, classes.copy(), boxes.copy()
+    wh = np.maximum(boxes[:, 2:4] - boxes[:, 0:2], 0)
+    areas = wh[:, 0] * wh[:, 1]
+    normalized_wh = wh / float(image_size)
+    normalized_area = areas / float(image_size * image_size)
+    is_candidate = (
+        (normalized_area >= min_area)
+        | (normalized_wh[:, 0] >= min_width)
+        | (normalized_wh[:, 1] >= min_height)
+    )
+    guide = np.zeros(len(boxes), dtype=bool)
+    class_ids = classes[:, 0].astype(np.int64)
+    for large_idx in np.flatnonzero(is_candidate):
+        same = np.flatnonzero(class_ids == class_ids[large_idx])
+        same = same[same != large_idx]
+        if not len(same):
+            continue
+        ix1 = np.maximum(boxes[large_idx, 0], boxes[same, 0])
+        iy1 = np.maximum(boxes[large_idx, 1], boxes[same, 1])
+        ix2 = np.minimum(boxes[large_idx, 2], boxes[same, 2])
+        iy2 = np.minimum(boxes[large_idx, 3], boxes[same, 3])
+        intersection = np.maximum(ix2 - ix1, 0) * np.maximum(iy2 - iy1, 0)
+        contained = intersection / np.maximum(areas[same], 1e-12) >= iobb_threshold
+        much_smaller = areas[large_idx] / np.maximum(areas[same], 1e-12) >= min_area_ratio
+        guide[large_idx] = bool(np.any(contained & much_smaller))
+    return classes[~guide], boxes[~guide], classes[guide], boxes[guide]
+
+
+def rasterize_guide(classes: np.ndarray, boxes: np.ndarray, nc: int, size: int) -> np.ndarray:
+    mask = np.zeros((nc, size, size), dtype=np.float32)
+    for cls, box in zip(classes, boxes):
+        x1, y1, x2, y2 = np.rint(box).astype(int)
+        x1, y1 = np.clip([x1, y1], 0, size)
+        x2, y2 = np.clip([x2, y2], 0, size)
+        if x2 > x1 and y2 > y1:
+            mask[int(cls[0]), y1:y2, x1:x2] = 1.0
+    return mask
+
+
 def letterbox(image: np.ndarray, boxes: np.ndarray, size: int, color=(114, 114, 114)):
     """Resize without distortion and transform absolute xyxy boxes."""
     h, w = image.shape[:2]
@@ -246,6 +297,12 @@ class YOLODataset(Dataset):
         mask_source: str | list[str] | None = None,
         mask_channels: int = 1,
         use_multiclass: bool = False,
+        use_coarse_guider: bool = False,
+        guide_iobb: float = 0.8,
+        guide_min_area_ratio: float = 4.0,
+        guide_min_area: float = 0.10,
+        guide_min_width: float = 0.35,
+        guide_min_height: float = 0.50,
     ):
         self.images = discover_images(source)
         self.labels = [image_to_label_path(x) for x in self.images]
@@ -256,6 +313,10 @@ class YOLODataset(Dataset):
             raise ValueError("mask_channels must be positive")
         self.mask_channels = mask_channels
         self.use_multiclass = use_multiclass
+        self.use_coarse_guider = use_coarse_guider
+        self.guide_params = (guide_iobb, guide_min_area_ratio, guide_min_area, guide_min_width, guide_min_height)
+        if use_coarse_guider and use_multiclass:
+            raise ValueError("coarse guider currently supports standard single-class labels only")
 
     def __len__(self):
         return len(self.images)
@@ -286,7 +347,13 @@ class YOLODataset(Dataset):
             mask = letterbox_mask(mask, target_size or self.image_size, ratio_pad)
             if mask.ndim == 2:
                 mask = mask[..., None]
-        return image, mask, classes, boxes, path, (h, w), ratio_pad
+        guide_classes = np.zeros((0, 1), np.float32)
+        guide_boxes = np.zeros((0, 4), np.float32)
+        if self.use_coarse_guider:
+            classes, boxes, guide_classes, guide_boxes = split_coarse_guide_boxes(
+                classes, boxes, target_size or self.image_size, *self.guide_params
+            )
+        return image, mask, classes, boxes, guide_classes, guide_boxes, path, (h, w), ratio_pad
 
     def _mosaic4(self, index: int):
         half = self.image_size // 2
@@ -296,10 +363,10 @@ class YOLODataset(Dataset):
             shape = (self.image_size, self.image_size, self.mask_channels)
             mask_canvas = np.zeros(shape, dtype=np.float32)
         indices = [index] + random.choices(range(len(self)), k=3)
-        all_cls, all_boxes = [], []
+        all_cls, all_boxes, all_guide_cls, all_guide_boxes = [], [], [], []
         positions = ((0, 0), (half, 0), (0, half), (half, half))
         for idx, (x, y) in zip(indices, positions):
-            image, mask, classes, boxes, *_ = self._read(idx, half)
+            image, mask, classes, boxes, guide_classes, guide_boxes, *_ = self._read(idx, half)
             canvas[y : y + half, x : x + half] = image
             if mask_canvas is not None:
                 mask_canvas[y : y + half, x : x + half] = mask
@@ -308,14 +375,21 @@ class YOLODataset(Dataset):
                 boxes[:, [1, 3]] += y
                 all_cls.append(classes)
                 all_boxes.append(boxes)
+            if len(guide_boxes):
+                guide_boxes[:, [0, 2]] += x
+                guide_boxes[:, [1, 3]] += y
+                all_guide_cls.append(guide_classes)
+                all_guide_boxes.append(guide_boxes)
         class_columns = self.nc if self.use_multiclass else 1
         classes = np.concatenate(all_cls, 0) if all_cls else np.zeros((0, class_columns), np.float32)
         boxes = np.concatenate(all_boxes, 0) if all_boxes else np.zeros((0, 4), np.float32)
-        return canvas, mask_canvas, classes, boxes, self.images[index], (self.image_size, self.image_size), (1.0, (0, 0))
+        guide_classes = np.concatenate(all_guide_cls, 0) if all_guide_cls else np.zeros((0, 1), np.float32)
+        guide_boxes = np.concatenate(all_guide_boxes, 0) if all_guide_boxes else np.zeros((0, 4), np.float32)
+        return canvas, mask_canvas, classes, boxes, guide_classes, guide_boxes, self.images[index], (self.image_size, self.image_size), (1.0, (0, 0))
 
     def __getitem__(self, index):
         sample = self._mosaic4(index) if self.augment and random.random() < self.mosaic else self._read(index)
-        image, mask, classes, boxes, path, original_shape, ratio_pad = sample
+        image, mask, classes, boxes, guide_classes, guide_boxes, path, original_shape, ratio_pad = sample
         if self.augment:
             image = augment_hsv(image, *self.hsv)
             if random.random() < self.hflip:
@@ -326,6 +400,10 @@ class YOLODataset(Dataset):
                     x1 = boxes[:, 0].copy()
                     boxes[:, 0] = self.image_size - boxes[:, 2]
                     boxes[:, 2] = self.image_size - x1
+                if len(guide_boxes):
+                    x1 = guide_boxes[:, 0].copy()
+                    guide_boxes[:, 0] = self.image_size - guide_boxes[:, 2]
+                    guide_boxes[:, 2] = self.image_size - x1
         if len(boxes):
             boxes = boxes.clip(0, self.image_size)
             wh = boxes[:, 2:4] - boxes[:, 0:2]
@@ -342,6 +420,10 @@ class YOLODataset(Dataset):
             "original_shape": original_shape,
             "ratio_pad": ratio_pad,
         }
+        if self.use_coarse_guider:
+            output["guide_mask"] = torch.from_numpy(
+                rasterize_guide(guide_classes, guide_boxes, self.nc, self.image_size)
+            )
         if mask is not None:
             if mask.ndim == 2:
                 mask = mask[..., None]
@@ -354,6 +436,8 @@ class YOLODataset(Dataset):
         output = {"img": torch.stack([x["img"] for x in batch])}
         if "mask" in batch[0]:
             output["mask"] = torch.stack([x["mask"] for x in batch])
+        if "guide_mask" in batch[0]:
+            output["guide_mask"] = torch.stack([x["guide_mask"] for x in batch])
         output["cls"] = torch.cat([x["cls"] for x in batch], 0)
         output["bboxes"] = torch.cat([x["bboxes"] for x in batch], 0)
         output["batch_idx"] = torch.cat(
@@ -381,16 +465,26 @@ def create_dataloader(
     rank=0,
     world_size=1,
     use_multiclass=False,
+    use_coarse_guider=False,
+    guide_iobb=0.8,
+    guide_min_area_ratio=4.0,
+    guide_min_area=0.10,
+    guide_min_width=0.35,
+    guide_min_height=0.50,
 ):
     if use_multiclass:
         dataset = YOLODataset(
             source, nc, image_size, augment, mosaic, hflip, hsv, mask_source, mask_channels,
-            use_multiclass=True,
+            use_multiclass=True, use_coarse_guider=use_coarse_guider,
+            guide_iobb=guide_iobb, guide_min_area_ratio=guide_min_area_ratio,
+            guide_min_area=guide_min_area, guide_min_width=guide_min_width, guide_min_height=guide_min_height,
         )
     else:
         dataset = YOLODataset(
             source, nc, image_size, augment, mosaic, hflip, hsv, mask_source, mask_channels,
-            use_multiclass=False,
+            use_multiclass=False, use_coarse_guider=use_coarse_guider,
+            guide_iobb=guide_iobb, guide_min_area_ratio=guide_min_area_ratio,
+            guide_min_area=guide_min_area, guide_min_width=guide_min_width, guide_min_height=guide_min_height,
         )
     sampler = (
         DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=augment)

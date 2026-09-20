@@ -242,10 +242,14 @@ class DetectionLoss:
 class YOLO26Loss:
     """Progressive dual-head loss; the one-to-many weight decays toward 0.1."""
 
-    def __init__(self, model, epochs=100, box=7.5, cls=0.5, l1=1.5, use_multiclass=False):
+    def __init__(
+        self, model, epochs=100, box=7.5, cls=0.5, l1=1.5, use_multiclass=False,
+        guide_loss_weight=0.5,
+    ):
         self.one2many = DetectionLoss(model, box, cls, l1, topk=10, use_multiclass=use_multiclass)
         self.one2one = DetectionLoss(model, box, cls, l1, topk=7, topk2=1, use_multiclass=use_multiclass)
         self.epochs, self.epoch = epochs, 0
+        self.guide_loss_weight = guide_loss_weight
 
     @property
     def o2m_weight(self):
@@ -258,4 +262,28 @@ class YOLO26Loss:
         o2m, _ = self.one2many(preds["one2many"], batch)
         o2o, items = self.one2one(preds["one2one"], batch)
         w = self.o2m_weight
-        return o2m * w + o2o * (1 - w), {**items, "o2m_weight": w}
+        loss = o2m * w + o2o * (1 - w)
+        output_items = {**items, "o2m_weight": w}
+        if "guide_logits" in preds:
+            if "guide_mask" not in batch:
+                raise KeyError("coarse-guider predictions require batch['guide_mask']")
+            target = batch["guide_mask"].float()
+            scale_losses = []
+            for logits in preds["guide_logits"]:
+                resized = F.interpolate(target, size=logits.shape[-2:], mode="nearest")
+                positives = resized.sum()
+                negatives = resized.numel() - positives
+                pos_weight = (negatives / positives.clamp_min(1)).clamp(1, 20).detach()
+                bce = F.binary_cross_entropy_with_logits(logits.float(), resized, pos_weight=pos_weight)
+                probabilities = logits.float().sigmoid()
+                intersection = (probabilities * resized).sum(dim=(2, 3))
+                dice = 1 - ((2 * intersection + 1) / (
+                    probabilities.sum(dim=(2, 3)) + resized.sum(dim=(2, 3)) + 1
+                )).mean()
+                scale_losses.append(bce + dice)
+            # DetectionLoss returns batch-scaled components; keep the auxiliary
+            # component on the same scale so batch size does not alter its ratio.
+            guide_loss = torch.stack(scale_losses).mean() * self.guide_loss_weight * target.shape[0]
+            loss = torch.cat((loss, guide_loss.unsqueeze(0)))
+            output_items["guide"] = guide_loss.detach()
+        return loss, output_items
