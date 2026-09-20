@@ -1,169 +1,153 @@
-import os
-from glob import glob
+"""Generate four-channel anatomical masks for the mask-guided YOLO26 model."""
+
+from __future__ import annotations
+
+import argparse
+import json
 from pathlib import Path
 
 import cv2
 import numpy as np
+import pydicom
 import torch
 import torchxrayvision as xrv
+from tqdm import tqdm
 
-# =========================
-# Config
-# =========================
-device = 'cuda:1'
-IMG_DIR = Path("datasets/png/images")
-SEG_DIR = "datasets/png/seg"
-SEG_VIS_DIR = "datasets/png/seg_vis"
-Path(SEG_DIR).mkdir(exist_ok=True)
-Path(SEG_VIS_DIR).mkdir(exist_ok=True)
-
-THRESH = 0.5
-ALPHA = 0.35   # độ trong suốt lớp màu
-
-# 14 màu BGR khác nhau
-COLORS = [
-    (255,   0,   0),   # Left Clavicle
-    (  0, 255,   0),   # Right Clavicle
-    (  0,   0, 255),   # Left Scapula
-    (255, 255,   0),   # Right Scapula
-    (255,   0, 255),   # Left Lung
-    (  0, 255, 255),   # Right Lung
-    (128,   0,   0),   # Left Hilus Pulmonis
-    (  0, 128,   0),   # Right Hilus Pulmonis
-    (  0,   0, 128),   # Heart
-    (128, 128,   0),   # Aorta
-    (128,   0, 128),   # Facies Diaphragmatica
-    (  0, 128, 128),   # Mediastinum
-    (200, 100,   0),   # Weasand
-    (100,   0, 200),   # Spine
-]
+TARGET_INDICES = (4, 5, 8, 9)  # left lung, right lung, heart, aorta
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+COLORS = ((255, 0, 255), (0, 255, 255), (0, 0, 128), (128, 128, 0))
 
 
-def ensure_probs(x):
-    """
-    Nếu output là logits thì sigmoid.
-    Nếu đã là prob [0,1] thì giữ nguyên.
-    """
-    if x.min() < 0 or x.max() > 1:
-        x = torch.sigmoid(x)
-    return x
+def first_number(value) -> float:
+    try:
+        return float(value[0])
+    except (TypeError, IndexError):
+        return float(value)
 
 
-def overlay_mask(image_bgr, mask, color, alpha=0.35):
-    """
-    image_bgr: HxWx3
-    mask: HxW bool / uint8
-    color: BGR tuple
-    """
-    out = image_bgr.copy()
-    mask = mask.astype(bool)
-
-    color_arr = np.array(color, dtype=np.float32)
-    out_float = out.astype(np.float32)
-
-    out_float[mask] = out_float[mask] * (1 - alpha) + color_arr * alpha
-    out = out_float.astype(np.uint8)
-
-    # vẽ contour để rõ biên
-    mask_u8 = (mask.astype(np.uint8) * 255)
-    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(out, contours, -1, color, 1)
-
-    return out
+def read_dicom(path: Path) -> np.ndarray:
+    """Decode DICOM identically to tools/dicom2png.py."""
+    dataset = pydicom.dcmread(path)
+    image = dataset.pixel_array.astype(np.float32)
+    image = image * float(dataset.get("RescaleSlope", 1)) + float(dataset.get("RescaleIntercept", 0))
+    center, width = dataset.get("WindowCenter"), dataset.get("WindowWidth")
+    if center is not None and width is not None:
+        center, width = first_number(center), first_number(width)
+        low, high = center - width / 2, center + width / 2
+    else:
+        low, high = float(image.min()), float(image.max())
+    if high <= low:
+        raise ValueError(f"invalid DICOM pixel range [{low}, {high}]")
+    image = np.clip((np.clip(image, low, high) - low) * (255.0 / (high - low)), 0, 255)
+    if dataset.get("PhotometricInterpretation") == "MONOCHROME1":
+        image = 255.0 - image
+    return image.astype(np.uint8)
 
 
-def add_legend(image_bgr, class_names, colors):
-    h, w = image_bgr.shape[:2]
-    legend_w = 360
-    canvas = np.ones((h, w + legend_w, 3), dtype=np.uint8) * 255
-    canvas[:, :w] = image_bgr
-
-    x0 = w + 20
-    y = 30
-    cv2.putText(canvas, "Classes", (x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 2)
-    y += 25
-
-    for name, color in zip(class_names, colors):
-        cv2.rectangle(canvas, (x0, y - 12), (x0 + 20, y + 8), color, -1)
-        cv2.rectangle(canvas, (x0, y - 12), (x0 + 20, y + 8), (0,0,0), 1)
-        cv2.putText(canvas, name, (x0 + 30, y + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,0,0), 1, cv2.LINE_AA)
-        y += 28
-
+def letterbox_black(image: np.ndarray, size: int = 640) -> np.ndarray:
+    """Match the black-padded square images used during training."""
+    height, width = image.shape[:2]
+    scale = min(size / width, size / height)
+    new_width, new_height = round(width * scale), round(height * scale)
+    resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+    left, top = (size - new_width) // 2, (size - new_height) // 2
+    canvas = np.zeros((size, size), dtype=np.uint8)
+    canvas[top : top + new_height, left : left + new_width] = resized
     return canvas
 
 
-# =========================
-# Load model
-# =========================
-model = xrv.baseline_models.chestx_det.PSPNet()
-model.eval()
-model.to(device)
+def read_image(path: Path, image_size: int) -> np.ndarray:
+    if path.suffix.lower() == ".dicom":
+        return letterbox_black(read_dicom(path), image_size)
+    image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise RuntimeError(f"Cannot read image: {path}")
+    return image if image.shape == (image_size, image_size) else letterbox_black(image, image_size)
 
-# =========================
-# Read original image
-# =========================
-for img_path in IMG_DIR.glob('*.png'):
-    img_gray = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-    if img_gray is None:
-        raise RuntimeError(f"Cannot read image: {img_path}")
 
-    orig_h, orig_w = img_gray.shape[:2]
+def discover_images(source: Path) -> list[Path]:
+    if source.is_file():
+        return [source]
+    paths = [
+        path for path in source.rglob("*")
+        if path.is_file() and (path.suffix.lower() in IMAGE_SUFFIXES or path.suffix.lower() == ".dicom")
+    ]
+    if not paths:
+        raise FileNotFoundError(f"No supported images found in {source}")
+    return sorted(paths)
 
-    # ảnh để visualize
-    vis_img = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
 
-    # =========================
-    # Preprocess for model
-    # =========================
-    img = xrv.datasets.normalize(img_gray, 255)   # -> float
-    img = img[None, ...]                          # [1, H, W]
+def ensure_probs(output: torch.Tensor) -> torch.Tensor:
+    return torch.sigmoid(output) if output.min() < 0 or output.max() > 1 else output
 
-    transform = xrv.datasets.XRayResizer(512)
-    img = transform(img)                          # [1, 512, 512]
 
-    img = torch.from_numpy(img).float().unsqueeze(0).to(device)   # [1,1,512,512]
+def save_visualization(path: Path, image: np.ndarray, masks: np.ndarray, names: list[str]) -> None:
+    overlay = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    for channel, (mask, color, name) in enumerate(zip(masks, COLORS, names)):
+        selected = mask.astype(bool)
+        overlay[selected] = (
+            overlay[selected].astype(np.float32) * 0.65 + np.asarray(color, dtype=np.float32) * 0.35
+        ).astype(np.uint8)
+        contours, _ = cv2.findContours(mask.astype(np.uint8) * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay, contours, -1, color, 1)
+        cv2.putText(overlay, name, (8, 22 + channel * 22), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, color, 1, cv2.LINE_AA)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), overlay)
 
-    # =========================
-    # Inference
-    # =========================
-    with torch.no_grad():
-        output = model(img)                       # [1,14,512,512]
 
-    output = output[0].cpu()                      # [14,512,512]
-    output = ensure_probs(output)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate four-channel chest anatomy masks")
+    parser.add_argument("--input", type=Path, default=Path("datasets/png/images"))
+    parser.add_argument("--output", type=Path, default=Path("datasets/png/seg"))
+    parser.add_argument("--visualize", type=Path, default=None,
+                        help="Optional directory for mask overlay PNGs")
+    parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--image-size", type=int, default=640)
+    parser.add_argument("--overwrite", action="store_true")
+    return parser.parse_args()
 
-    class_names = model.targets
-    print("Classes:", class_names)
 
-    # =========================
-    # Resize masks back to original size + overlay
-    # =========================
-    overlay = vis_img.copy()
-    masks = []
-    for i, class_name in enumerate(class_names):
-        if i not in [4, 5, 8, 9]:
+@torch.inference_mode()
+def main() -> None:
+    args = parse_args()
+    paths = discover_images(args.input)
+    args.output.mkdir(parents=True, exist_ok=True)
+    model = xrv.baseline_models.chestx_det.PSPNet().eval().to(args.device)
+    target_names = [model.targets[index] for index in TARGET_INDICES]
+    resizer = xrv.datasets.XRayResizer(512)
+    completed, skipped, failed = 0, 0, []
+
+    for path in tqdm(paths, desc="segment"):
+        output_path = args.output / f"{path.stem}.npy"
+        if output_path.exists() and not args.overwrite:
+            skipped += 1
             continue
-        prob_map = output[i].numpy()  # [512,512]
+        try:
+            image = read_image(path, args.image_size)
+            normalized = xrv.datasets.normalize(image, 255)[None, ...]
+            tensor = torch.from_numpy(resizer(normalized)).float().unsqueeze(0).to(args.device)
+            probabilities = ensure_probs(model(tensor)[0].cpu())
+            # Never drop an empty channel: channel position is part of the model input contract.
+            masks = np.stack([
+                cv2.resize(probabilities[index].numpy(), (args.image_size, args.image_size),
+                           interpolation=cv2.INTER_LINEAR) > args.threshold
+                for index in TARGET_INDICES
+            ]).astype(np.uint8)
+            np.save(output_path, masks)
+            if args.visualize is not None:
+                save_visualization(args.visualize / f"{path.stem}.png", image, masks, target_names)
+            completed += 1
+        except Exception as exc:
+            failed.append((str(path), str(exc)))
 
-        # resize về size ảnh gốc
-        prob_map = cv2.resize(prob_map, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+    print(f"Saved: {completed} | skipped: {skipped} | failed: {len(failed)}")
+    if failed:
+        failure_path = args.output / "failed.json"
+        failure_path.write_text(json.dumps(failed, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"Failure details: {failure_path}")
 
-        # threshold để ra binary mask
-        mask = prob_map > THRESH
 
-        # nếu muốn bỏ class quá nhỏ thì có thể check mask.sum()
-        if mask.sum() == 0:
-            continue
-
-        overlay = overlay_mask(overlay, mask, COLORS[i], alpha=ALPHA)
-        masks.append(mask)
-
-        print(f"{i:02d} | {class_name:25s} | area={int(mask.sum())}")
-
-    # =========================
-    # Add legend and save
-    # =========================
-    result = add_legend(overlay, class_names, COLORS)
-    cv2.imwrite(f'{SEG_VIS_DIR}/{os.path.basename(img_path)}', result)
-    np.save(f'{SEG_DIR}/{os.path.basename(img_path)[:-4]}.npy', np.stack(masks, 0))
+if __name__ == "__main__":
+    main()

@@ -3,9 +3,11 @@
 /lib
 /weights
 /runs
+*/__pycache__
 /__pycache__
 *.jpg
 *.png
 *.json
 *.log
 *.pt
+/research_codex
