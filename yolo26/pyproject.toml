@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yolo26-compact"
+version = "0.1.0"
+description = "A compact, detection-only YOLO26 training and validation implementation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "AGPL-3.0-only"}
+dependencies = [
+  "numpy>=1.24",
+  "opencv-python-headless>=4.8",
+  "PyYAML>=6.0",
+  "torch>=2.2",
+  "torchvision>=0.17",
+  "tqdm>=4.66",
+]
+
+[tool.setuptools]
+py-modules = [
+  "config", "model", "dataloader", "losses", "metrics", "optimizer",
+  "train", "val", "predict", "convert_ultralytics", "utils"
+]
+
+[tool.ruff]
+line-length = 120
+

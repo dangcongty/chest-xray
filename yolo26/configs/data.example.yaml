@@ -1,0 +1,10 @@
+path: /absolute/path/to/dataset
+train: images/train
+val: images/val
+# Required only when `model_route: mask_guider` is enabled.
+# Mask files are paired with images by filename stem.
+train_masks: masks/train
+val_masks: masks/val
+names:
+  0: class_a
+  1: class_b

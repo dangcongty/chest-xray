@@ -1,0 +1,23 @@
+data: data.yaml
+size: n
+model_route: image  # image | mask_guider
+mask_channels: 1
+use_multiclass: false  # false: class x y w h; true: class1 class2 ... x y w h
+epochs: 100
+batch_size: 16
+image_size: 640
+workers: 8
+optimizer: AdamW
+lr: 0.001
+final_lr_ratio: 0.01
+weight_decay: 0.0005
+box: 7.5
+cls: 0.5
+l1: 1.5
+mosaic: 1.0
+close_mosaic: 10
+hflip: 0.5
+amp: true
+ema: true
+output: runs/train
+name: yolo26n

@@ -1,0 +1,11 @@
+/datasets
+/legacy
+/lib
+/weights
+/runs
+/__pycache__
+*.jpg
+*.png
+*.json
+*.log
+*.pt
