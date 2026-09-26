@@ -20,7 +20,7 @@ from tqdm import tqdm
 from yolo26.config import TrainConfig, load_data_config, merge_config
 from yolo26.dataloader import create_dataloader
 from yolo26.losses import YOLO26Loss
-from yolo26.model import YOLO26, build_model
+from yolo26.model import YOLO26, build_model, stn_targets
 from yolo26.optimizer import build_optimizer
 from yolo26.utils import (
     AverageMeter,
@@ -171,7 +171,9 @@ def _train(cfg: TrainConfig):
                     group["lr"] = cfg.lr * lr_factor * warm * group.get("lr_scale", 1.0)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
-                loss_vec, items = criterion(forward_batch(model, batch), batch)
+                raw = forward_batch(model, batch)
+                targets = stn_targets(batch, raw["stn_theta"]) if cfg.model_route == "stn" else batch
+                loss_vec, items = criterion(raw, targets)
                 loss = loss_vec.sum()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -329,7 +331,7 @@ if __name__ == "__main__":
         data="/mnt/workspace/ty/xray/datasets/yolo/data.yaml",
         size="m",
         weights="yolo26m.pt",
-        model_route="coarse_guider",  # image | mask_guider | coarse_guider
+        model_route="stn",  # image | mask_guider | coarse_guider | stn
         mask_channels=4,
         guide_loss_weight=0.5,
         guide_iobb=0.8,
@@ -342,7 +344,7 @@ if __name__ == "__main__":
         device=0,
         optimizer="AdamW",
         lr=1e-3,
-        name="coarse-guider-yolo-attempt-1",
+        name="stn-yolo-attempt-1",
         seed=1234,
         hflip=0.5,
         hsv_h=0.0,

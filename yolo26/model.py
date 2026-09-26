@@ -582,6 +582,96 @@ class YOLO26withCoarseGuider(YOLO26):
         return output
 
 
+class YOLO26withSTN(YOLO26):
+    """Learn a bounded affine image warp before detection, jointly with YOLO26."""
+
+    def __init__(self, nc=80, size="n"):
+        super().__init__(nc=nc, size=size)
+        self.model_route = "stn"
+        self.localization = nn.Sequential(
+            nn.Conv2d(3, 16, 5, 2, 2), nn.SiLU(),
+            nn.Conv2d(16, 32, 3, 2, 1), nn.SiLU(),
+            nn.Conv2d(32, 64, 3, 2, 1), nn.SiLU(),
+            nn.AdaptiveAvgPool2d(1), nn.Flatten(),
+            nn.Linear(64, 32), nn.SiLU(), nn.Linear(32, 6),
+        )
+        nn.init.zeros_(self.localization[-1].weight)
+        nn.init.zeros_(self.localization[-1].bias)
+
+    def forward(self, image):
+        # theta maps detector/output coordinates to original/input coordinates.
+        # Keep the matrix inversion used by target mapping in float32 under AMP.
+        with torch.autocast(device_type=image.device.type, enabled=False):
+            source = image.float()
+            delta = self.localization(source).tanh().view(-1, 2, 3)
+            identity = source.new_tensor([[1., 0., 0.], [0., 1., 0.]])
+            scale = source.new_tensor([[0.15, 0.10, 0.20], [0.10, 0.15, 0.20]])
+            theta = identity + delta * scale
+            grid = nn.functional.affine_grid(theta, source.shape, align_corners=False)
+            warped = nn.functional.grid_sample(source, grid, padding_mode="border", align_corners=False)
+        output = super().forward(warped)
+        output["stn_theta"] = theta
+        return output
+
+    @torch.no_grad()
+    def predict(self, images, conf=0.25, iou=0.7, max_det=300, end2end=True):
+        training = self.training
+        self.eval()
+        raw = self(images)
+        result = self.head.postprocess(raw, conf, iou, max_det, end2end)
+        result = restore_stn_predictions(result, raw["stn_theta"], images.shape[-2:])
+        self.train(training)
+        return result
+
+
+def _transform_box_corners(boxes, matrices):
+    """Transform all four corners; return enclosing axis-aligned boxes."""
+    x1, y1, x2, y2 = boxes.unbind(-1)
+    corners = torch.stack((
+        torch.stack((x1, y1), -1), torch.stack((x2, y1), -1),
+        torch.stack((x1, y2), -1), torch.stack((x2, y2), -1),
+    ), -2)
+    mapped = corners @ matrices[..., :2].transpose(-1, -2) + matrices[..., 2].unsqueeze(-2)
+    lo, hi = mapped.amin(-2), mapped.amax(-2)
+    return torch.cat((lo, hi), -1)
+
+
+def stn_targets(batch, theta):
+    """Map normalized original YOLO boxes into the STN output frame."""
+    if not batch["bboxes"].numel():
+        return batch
+    affine = torch.eye(3, device=theta.device, dtype=theta.dtype).expand(len(theta), -1, -1).clone()
+    affine[:, :2] = theta
+    inverse = torch.linalg.inv(affine)[:, :2]
+    wh = batch["bboxes"]
+    xyxy = torch.cat((wh[:, :2] - wh[:, 2:] / 2, wh[:, :2] + wh[:, 2:] / 2), -1)
+    xyxy = xyxy * 2 - 1
+    transformed = _transform_box_corners(xyxy, inverse[batch["batch_idx"].long()])
+    transformed = ((transformed + 1) / 2).clamp(0, 1)
+    valid = (transformed[:, 2] > transformed[:, 0]) & (transformed[:, 3] > transformed[:, 1])
+    transformed = transformed[valid]
+    center = (transformed[:, :2] + transformed[:, 2:]) / 2
+    size = transformed[:, 2:] - transformed[:, :2]
+    return {**batch, "bboxes": torch.cat((center, size), -1),
+            "cls": batch["cls"][valid], "batch_idx": batch["batch_idx"][valid]}
+
+
+def restore_stn_predictions(predictions, theta, image_shape):
+    """Map detector boxes in pixels back to original letterboxed image pixels."""
+    height, width = image_shape
+    result = []
+    for boxes, matrix in zip(predictions, theta):
+        boxes = boxes.clone()
+        if boxes.numel():
+            normalized = boxes[:, :4] / boxes.new_tensor([width, height, width, height]) * 2 - 1
+            mapped = _transform_box_corners(normalized, matrix)
+            boxes[:, :4] = ((mapped + 1) / 2 * boxes.new_tensor([width, height, width, height]))
+            boxes[:, [0, 2]] = boxes[:, [0, 2]].clamp(0, width)
+            boxes[:, [1, 3]] = boxes[:, [1, 3]].clamp(0, height)
+        result.append(boxes)
+    return result
+
+
 def build_model(
     size="n", nc=80, weights: str | None = None, model_route="image", mask_channels=1
 ) -> YOLO26:
@@ -589,6 +679,7 @@ def build_model(
         "image": YOLO26,
         "mask_guider": YOLO26withMaskGuider,
         "coarse_guider": YOLO26withCoarseGuider,
+        "stn": YOLO26withSTN,
     }
     if model_route not in routes:
         raise ValueError(f"unknown model route {model_route!r}; choose from {tuple(routes)}")

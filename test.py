@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from yolo26.dataloader import read_mask, rasterize_guide, split_coarse_guide_boxes, xyxy_to_xywhn
 from yolo26.metrics import DetectionMetrics
-from yolo26.model import build_model
+from yolo26.model import build_model, restore_stn_predictions
 from yolo26.utils import forward_batch, move_batch, select_device
 
 ROOT = Path(__file__).resolve().parent
@@ -262,6 +262,8 @@ def main() -> None:
                 )
             ),
         )
+        if "stn_theta" in raw:
+            predictions = restore_stn_predictions(predictions, raw["stn_theta"], device_batch["img"].shape[-2:])
         metrics.update(predictions, device_batch, args.imgsz)
         for prediction, path, shape, ratio_pad in zip(
             predictions, batch["path"], batch["original_shape"], batch["ratio_pad"]

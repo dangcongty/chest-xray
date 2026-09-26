@@ -13,13 +13,13 @@ try:
     from .config import load_data_config
     from .dataloader import create_dataloader
     from .metrics import DetectionMetrics
-    from .model import build_model
+    from .model import build_model, restore_stn_predictions, stn_targets
     from .utils import forward_batch, move_batch, select_device
 except ImportError:
     from config import load_data_config
     from dataloader import create_dataloader
     from metrics import DetectionMetrics
-    from model import build_model
+    from model import build_model, restore_stn_predictions, stn_targets
     from utils import forward_batch, move_batch, select_device
 
 
@@ -36,11 +36,13 @@ def evaluate(
         batch = move_batch(batch, device)
         raw = forward_batch(model, batch)
         if criterion is not None:
-            loss_vec, _ = criterion(raw, batch)
+            loss_vec, _ = criterion(raw, stn_targets(batch, raw["stn_theta"]) if "stn_theta" in raw else batch)
             if loss_sum is None:
                 loss_sum = torch.zeros_like(loss_vec)
             loss_sum += loss_vec
         predictions = model.head.postprocess(raw, conf, iou, max_det, end2end, multi_label=use_multiclass)
+        if "stn_theta" in raw:
+            predictions = restore_stn_predictions(predictions, raw["stn_theta"], batch["img"].shape[-2:])
         metrics.update(predictions, batch, image_size)
         seen += batch["img"].shape[0]
     result = metrics.compute()

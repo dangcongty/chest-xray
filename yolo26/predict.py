@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from dataloader import discover_images, letterbox
-from model import YOLO26
+from model import build_model
 from utils import select_device
 
 
@@ -38,7 +38,10 @@ def main():
     names = ckpt.get("names") or [str(i) for i in range(nc)]
     size = args.size or ckpt.get("size", "n")
     device = select_device(args.device)
-    model = YOLO26(nc, size).to(device)
+    route = ckpt.get("model_route", "image")
+    if route == "mask_guider":
+        raise ValueError("mask_guider prediction requires an external mask; use the mask-aware evaluation path")
+    model = build_model(size=size, nc=nc, model_route=route).to(device)
     model.load_compact(args.weights, strict=False)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)

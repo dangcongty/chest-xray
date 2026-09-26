@@ -1,6 +1,6 @@
 data: data.yaml
 size: n
-model_route: image  # image | mask_guider
+model_route: image  # image | mask_guider | coarse_guider | stn
 mask_channels: 1
 use_multiclass: false  # false: class x y w h; true: class1 class2 ... x y w h
 epochs: 100

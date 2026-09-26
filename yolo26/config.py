@@ -77,8 +77,8 @@ class TrainConfig:
             raise ValueError("image_size must be divisible by 32")
         if self.epochs < 1 or self.batch_size < 1:
             raise ValueError("epochs and batch_size must be positive")
-        if self.model_route not in {"image", "mask_guider", "coarse_guider"}:
-            raise ValueError("model_route must be 'image', 'mask_guider' or 'coarse_guider'")
+        if self.model_route not in {"image", "mask_guider", "coarse_guider", "stn"}:
+            raise ValueError("model_route must be 'image', 'mask_guider', 'coarse_guider' or 'stn'")
         if self.mask_channels < 1:
             raise ValueError("mask_channels must be positive")
         if not isinstance(self.use_multiclass, bool):

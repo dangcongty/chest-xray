@@ -75,6 +75,12 @@ Model vẫn hỗ trợ ba route độc lập:
 | `image` | YOLO26 ảnh gốc, không có guider |
 | `mask_guider` | Nhận anatomical mask từ bên ngoài qua mask backbone |
 | `coarse_guider` | Tự dự đoán guide từ ảnh và học bằng coarse boxes |
+| `stn` | Học affine STN trên ảnh trước YOLO26; box nhãn được biến đổi đồng bộ trong loss |
+
+Route `stn` dùng toàn bộ box như `image`. STN bắt đầu ở phép biến đổi đồng nhất,
+học dịch chuyển/co giãn/xiên nhẹ cùng YOLO26, và đưa box dự đoán trở về tọa độ
+ảnh gốc trước khi tính metric hoặc xuất kết quả. Chọn bằng
+`model_route="stn"` trong `train(...)`; không cần sửa dataloader hay nhãn.
 
 ## Loss
 

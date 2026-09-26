@@ -11,10 +11,31 @@ import torch
 from dataloader import YOLODataset, read_label
 from losses import YOLO26Loss
 from metrics import DetectionMetrics
-from model import YOLO26, build_model
+from model import YOLO26, build_model, restore_stn_predictions, stn_targets
 
 
 class SmokeTests(unittest.TestCase):
+    def test_stn_end_to_end_and_coordinate_round_trip(self):
+        model = build_model(size="n", nc=2, model_route="stn").train()
+        images = torch.rand(2, 3, 64, 64)
+        batch = {
+            "batch_idx": torch.tensor([0, 1]),
+            "cls": torch.tensor([[0.], [1.]]),
+            "bboxes": torch.tensor([[0.5, 0.5, 0.25, 0.25], [0.4, 0.4, 0.2, 0.2]]),
+        }
+        raw = model(images)
+        expected = torch.tensor([[1., 0., 0.], [0., 1., 0.]])
+        self.assertTrue(torch.allclose(raw["stn_theta"][0], expected))
+        targets = stn_targets(batch, raw["stn_theta"])
+        self.assertTrue(torch.allclose(targets["bboxes"], batch["bboxes"], atol=1e-6))
+        loss, _ = YOLO26Loss(model, epochs=10)(raw, targets)
+        loss.sum().backward()
+        self.assertIsNotNone(model.localization[-1].weight.grad)
+        self.assertGreater(model.localization[-1].weight.grad.abs().sum().item(), 0)
+        predictions = [torch.tensor([[16., 16., 32., 32., .9, 0.]]) for _ in range(2)]
+        mapped = restore_stn_predictions(predictions, raw["stn_theta"], (64, 64))
+        self.assertTrue(torch.allclose(mapped[0], predictions[0], atol=1e-5))
+
     def test_model_parameter_count_and_forward(self):
         model = YOLO26(nc=3, size="n").train()
         self.assertEqual(model.num_parameters(), 2_504_970)

@@ -16,7 +16,7 @@ from tqdm import tqdm
 from config import TrainConfig, load_data_config, merge_config
 from dataloader import create_dataloader
 from losses import YOLO26Loss
-from model import build_model
+from model import build_model, stn_targets
 from optimizer import build_optimizer
 from utils import AverageMeter, ModelEMA, append_jsonl, forward_batch, move_batch, seed_everything, select_device
 from val import evaluate
@@ -142,7 +142,9 @@ def train(cfg: TrainConfig):
                     group["lr"] = cfg.lr * lr_factor * warm * group.get("lr_scale", 1.0)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
-                loss_vec, items = criterion(forward_batch(model, batch), batch)
+                raw = forward_batch(model, batch)
+                targets = stn_targets(batch, raw["stn_theta"]) if cfg.model_route == "stn" else batch
+                loss_vec, items = criterion(raw, targets)
                 loss = loss_vec.sum()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
